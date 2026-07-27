@@ -1,9 +1,10 @@
-const MODEL = "solar-pro3";
 const UPSTREAM =
   "https://ap-northeast-2.apistage.ai/v1/web/demo/chat/completions";
 const CSRF_ACTION_URL = "https://console.upstage.ai/playground/chat";
 const CSRF_ACTION_ID = "3931343b1f9fe526d1cb0cfbe42efc9383d3db34";
 let sessionId;
+let modelsPromise;
+let modelsExpiresAt = 0;
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-headers": "authorization, content-type",
@@ -39,6 +40,43 @@ async function getCsrfToken(actionId) {
   return token;
 }
 
+async function getModels() {
+  if (!modelsPromise || Date.now() >= modelsExpiresAt) {
+    modelsExpiresAt = Date.now() + 300_000;
+    modelsPromise = (async () => {
+      const page = await fetch(CSRF_ACTION_URL);
+      if (!page.ok) throw new Error("Unable to load Upstage Playground");
+      const html = await page.text();
+      const scripts = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/g)]
+        .map((match) => new URL(match[1], CSRF_ACTION_URL).href)
+        .filter((url) => /^\d+-[a-f0-9]+\.js$/.test(url.split("/").at(-1)));
+      const chunk = await Promise.any(scripts.map(async (url) => {
+        const text = await (await fetch(url)).text();
+        if (!text.includes("apiName:") || !text.includes("isDefault:!0")) {
+          throw new Error("Not the model metadata chunk");
+        }
+        return text;
+      }));
+      const records = [...chunk.matchAll(/(?:^|[,{])(?:"[^"]+"|[\w-]+):\{([^{}]*?apiName:"([^"]+)"[^{}]*?)\}(?=,|})/g)];
+      const models = [...new Set(records
+        .filter(([, record]) => record.includes("shortDescription:")
+          && !record.includes("privateRoles:")
+          && !record.includes("isDocev:")
+          && !record.includes("demoUrl:"))
+        .map(([, , apiName]) => apiName))];
+      if (!models.length) throw new Error("No Upstage models found");
+      return models;
+    })();
+  }
+  try {
+    return await modelsPromise;
+  } catch (error) {
+    modelsPromise = undefined;
+    modelsExpiresAt = 0;
+    throw error;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -48,7 +86,7 @@ export default {
     }
 
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      return json({ status: "ok", model: MODEL });
+      return json({ status: "ok" });
     }
 
     if (!env.API_KEY) {
@@ -60,10 +98,15 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/models") {
-      return json({
-        object: "list",
-        data: [{ id: MODEL, object: "model", created: 0, owned_by: "upstage" }],
-      });
+      try {
+        const models = await getModels();
+        return json({
+          object: "list",
+          data: models.map((id) => ({ id, object: "model", created: 0, owned_by: "upstage" })),
+        });
+      } catch {
+        return error("Unable to load Upstage models", 502, "upstream_error");
+      }
     }
 
     if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") {
@@ -80,13 +123,14 @@ export default {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       return error("messages must be a non-empty array", 400, "invalid_request_error");
     }
+    if (typeof body.model !== "string" || !body.model.trim()) {
+      return error("model must be a non-empty string", 400, "invalid_request_error");
+    }
 
     const includeThink = body.include_think !== false && url.searchParams.get("include_think") !== "false";
     delete body.include_think;
-    body.model = MODEL;
     body.stream ??= false;
     body.log_enabled ??= true;
-    body.reasoning_effort ??= "medium";
     if (typeof body.conversation_id !== "string" || !body.conversation_id) {
       body.conversation_id = crypto.randomUUID();
     }
