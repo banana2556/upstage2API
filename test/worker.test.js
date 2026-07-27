@@ -15,16 +15,22 @@ const request = (path, init = {}) =>
 test("routes, validation, and streaming proxy", async () => {
   const originalFetch = globalThis.fetch;
   let fetchCalls = 0;
+  let metadataLoads = 0;
+  const staleAction = "a".repeat(40);
+  const freshAction = "b".repeat(40);
   globalThis.fetch = async (url, init) => {
     fetchCalls++;
     if (url === "https://console.upstage.ai/playground/chat" && !init) {
       return new Response('<script src="/_next/static/chunks/1234-abcd.js"></script>');
     }
     if (url === "https://console.upstage.ai/_next/static/chunks/1234-abcd.js") {
-      return new Response('let x={one:{apiName:"model-a",shortDescription:"A"},hidden:{apiName:"hidden",shortDescription:"H",privateRoles:["x"]},two:{apiName:"model-b",shortDescription:"B",isDefault:!0},doc:{apiName:"doc",shortDescription:"D",isDocev:!0}}');
+      metadataLoads++;
+      const action = metadataLoads === 1 ? staleAction : freshAction;
+      return new Response(`let x={one:{apiName:"model-a",shortDescription:"A"},hidden:{apiName:"hidden",shortDescription:"H",privateRoles:["x"]},two:{apiName:"model-b",shortDescription:"B",isDefault:!0},doc:{apiName:"doc",shortDescription:"D",isDocev:!0}};aQ:function(){return o};var r=x,o=(0,r.$)("${action}")`);
     }
     if (url === "https://console.upstage.ai/playground/chat") {
-      assert.equal(init.headers["next-action"], "3931343b1f9fe526d1cb0cfbe42efc9383d3db34");
+      if (init.headers["next-action"] === staleAction) return new Response("<html></html>");
+      assert.equal(init.headers["next-action"], freshAction);
       return new Response('1:{"token":"fresh-csrf"}\n', {
         headers: { "content-type": "text/x-component" },
       });
@@ -63,7 +69,8 @@ test("routes, validation, and streaming proxy", async () => {
     );
     assert.equal(await response.text(), "data: [DONE]\n\n");
     assert.equal(response.headers.get("set-cookie"), null);
-    assert.equal(fetchCalls, 4);
+    assert.equal(metadataLoads, 2);
+    assert.equal(fetchCalls, 7);
   } finally {
     globalThis.fetch = originalFetch;
   }
