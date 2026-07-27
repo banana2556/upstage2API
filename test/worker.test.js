@@ -26,7 +26,7 @@ test("routes, validation, and streaming proxy", async () => {
     if (url === "https://console.upstage.ai/_next/static/chunks/1234-abcd.js") {
       metadataLoads++;
       const action = metadataLoads === 1 ? staleAction : freshAction;
-      return new Response(`let x={one:{apiName:"model-a",shortDescription:"A"},hidden:{apiName:"hidden",shortDescription:"H",privateRoles:["x"]},two:{apiName:"model-b",shortDescription:"B",isDefault:!0},doc:{apiName:"doc",shortDescription:"D",isDocev:!0}};aQ:function(){return o};var r=x,o=(0,r.$)("${action}")`);
+      return new Response(`let x={one:{apiName:"model-a",shortDescription:"A"},hidden:{apiName:"hidden",shortDescription:"H",privateRoles:["x"]},two:{apiName:"model-b",shortDescription:"B",isDefault:!0,isReasoning:!0},doc:{apiName:"doc",shortDescription:"D",isDocev:!0}},d={two:{reasoningEffort:"high",reasoningEffortOptions:["low","high"],temperature:.8}};aQ:function(){return o};var r=x,o=(0,r.$)("${action}")`);
     }
     if (url === "https://console.upstage.ai/playground/chat") {
       if (init.headers["next-action"] === staleAction) return new Response("<html></html>");
@@ -39,7 +39,14 @@ test("routes, validation, and streaming proxy", async () => {
     assert.match(url, /include_think=false$/);
     assert.equal(init.headers["x-csrf-token"], "fresh-csrf");
     assert.match(init.headers["x-session-id"], /^[0-9a-f-]{36}$/);
-    assert.equal(body.model, "model-b");
+    if (body.model === "model-b") {
+      assert.equal(body.temperature, 0.8);
+      assert.equal(body.reasoning_effort, "high");
+    } else {
+      assert.equal(body.model, "model-a");
+      assert.equal(body.temperature, 0.7);
+      assert.equal("reasoning_effort" in body, false);
+    }
     assert.match(body.conversation_id, /^[0-9a-f-]{36}$/);
     return new Response("data: [DONE]\n\n", {
       headers: { "content-type": "text/event-stream", "set-cookie": "secret=1" },
@@ -59,6 +66,24 @@ test("routes, validation, and streaming proxy", async () => {
     );
     assert.equal(invalid.status, 400);
 
+    const invalidTemperature = await worker.fetch(
+      request("/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "model-b", messages: [{ role: "user", content: "Hi" }], temperature: 2 }),
+      }),
+      env,
+    );
+    assert.equal(invalidTemperature.status, 400);
+
+    const invalidReasoning = await worker.fetch(
+      request("/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "model-b", messages: [{ role: "user", content: "Hi" }], reasoning_effort: "medium" }),
+      }),
+      env,
+    );
+    assert.equal(invalidReasoning.status, 400);
+
     const response = await worker.fetch(
       request("/v1/chat/completions?include_think=false", {
         method: "POST",
@@ -69,8 +94,18 @@ test("routes, validation, and streaming proxy", async () => {
     );
     assert.equal(await response.text(), "data: [DONE]\n\n");
     assert.equal(response.headers.get("set-cookie"), null);
+
+    const nonReasoning = await worker.fetch(
+      request("/v1/chat/completions?include_think=false", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "model-a", messages: [{ role: "user", content: "Hi" }], stream: true, reasoning_effort: "high" }),
+      }),
+      env,
+    );
+    assert.equal(await nonReasoning.text(), "data: [DONE]\n\n");
     assert.equal(metadataLoads, 2);
-    assert.equal(fetchCalls, 7);
+    assert.equal(fetchCalls, 9);
   } finally {
     globalThis.fetch = originalFetch;
   }

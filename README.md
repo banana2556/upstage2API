@@ -23,14 +23,14 @@ POST /v1/chat/completions
 curl https://upstage-web-2api.<subdomain>.workers.dev/v1/chat/completions \
   -H "Authorization: Bearer <API_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"solar-pro3","messages":[{"role":"user","content":"Hi"}],"stream":true}'
+  -d '{"model":"solar-pro3","messages":[{"role":"user","content":"Hi"}],"stream":true,"temperature":0.8,"reasoning_effort":"medium"}'
 ```
 
 ```bash
 curl 'https://upstage-web-2api.<subdomain>.workers.dev/v1/chat/completions?include_think=false' \
   -H "Authorization: Bearer <API_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"solar-pro3","messages":[{"role":"user","content":"Hi"}],"stream":true}'
+  -d '{"model":"solar-pro3","messages":[{"role":"user","content":"Hi"}],"stream":true,"temperature":0.8,"reasoning_effort":"medium"}'
 ```
 
 ## Models

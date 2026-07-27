@@ -55,13 +55,27 @@ async function getPlaygroundMetadata(refresh = false) {
         return response.ok ? response.text() : "";
       }));
       const modelChunk = chunks.find((text) => text.includes("apiName:") && text.includes("isDefault:!0")) || "";
-      const records = [...modelChunk.matchAll(/(?:^|[,{])(?:"[^"]+"|[\w-]+):\{([^{}]*?apiName:"([^"]+)"[^{}]*?)\}(?=,|})/g)];
-      const models = [...new Set(records
-        .filter(([, record]) => record.includes("shortDescription:")
+      const records = [...modelChunk.matchAll(/(?:^|[,{])(?:"([^"]+)"|([\w-]+)):\{([^{}]*?apiName:"([^"]+)"[^{}]*?)\}(?=,|})/g)];
+      const configs = new Map([...modelChunk.matchAll(/(?:^|[,{])(?:"([^"]+)"|([\w-]+)):\{([^{}]*(?:reasoningEffort|temperature):[^{}]*)\}(?=,|})/g)]
+        .map(([, quotedName, name, config]) => [quotedName || name, config]));
+      const models = [...new Map(records
+        .filter(([, , , record]) => record.includes("shortDescription:")
           && !record.includes("privateRoles:")
           && !record.includes("isDocev:")
           && !record.includes("demoUrl:"))
-        .map(([, , apiName]) => apiName))];
+        .map(([, quotedName, name, record, apiName]) => {
+          const config = configs.get(quotedName || name) || "";
+          const options = config.match(/reasoningEffortOptions:\[([^\]]*)\]/)?.[1] || "";
+          const reasoningEfforts = [...options.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+          const temperature = config.match(/temperature:(\.?\d+(?:\.\d+)?)/)?.[1];
+          return [apiName, {
+            id: apiName,
+            isReasoning: record.includes("isReasoning:!0"),
+            reasoningEffort: config.match(/reasoningEffort:"([^"]+)"/)?.[1] || "low",
+            reasoningEfforts: reasoningEfforts.length ? reasoningEfforts : ["low", "high"],
+            temperature: temperature === undefined ? 0.7 : Number(temperature),
+          }];
+        })).values()];
       // ponytail: parse the live bundle; UPSTAGE_CSRF_ACTION_ID is the fallback if its shape changes.
       const actionChunk = chunks.find((text) => text.includes("aQ:function(){return ")) || "";
       const actionStart = actionChunk.indexOf("aQ:function(){return ");
@@ -120,7 +134,7 @@ export default {
         if (!models.length) throw new Error("No Upstage models found");
         return json({
           object: "list",
-          data: models.map((id) => ({ id, object: "model", created: 0, owned_by: "upstage" })),
+          data: models.map(({ id }) => ({ id, object: "model", created: 0, owned_by: "upstage" })),
         });
       } catch {
         return error("Unable to load Upstage models", 502, "upstream_error");
@@ -144,8 +158,35 @@ export default {
     if (typeof body.model !== "string" || !body.model.trim()) {
       return error("model must be a non-empty string", 400, "invalid_request_error");
     }
+    body.model = body.model.trim();
 
-    const includeThink = body.include_think !== false && url.searchParams.get("include_think") !== "false";
+    let model;
+    try {
+      model = (await getPlaygroundMetadata()).models.find(({ id }) => id === body.model);
+    } catch {
+      return error("Unable to load Upstage models", 502, "upstream_error");
+    }
+    if (!model) return error("The requested model is not available", 400, "invalid_model");
+
+    body.temperature ??= model.temperature;
+    if (typeof body.temperature !== "number"
+      || !Number.isFinite(body.temperature)
+      || body.temperature < 0
+      || body.temperature > 1) {
+      return error("temperature must be a number between 0 and 1", 400, "invalid_request_error");
+    }
+    if (model.isReasoning) {
+      body.reasoning_effort ??= model.reasoningEffort;
+      if (!model.reasoningEfforts.includes(body.reasoning_effort)) {
+        return error(`reasoning_effort must be one of: ${model.reasoningEfforts.join(", ")}`, 400, "invalid_request_error");
+      }
+    } else {
+      delete body.reasoning_effort;
+    }
+
+    const includeThink = model.isReasoning
+      && body.include_think !== false
+      && url.searchParams.get("include_think") !== "false";
     delete body.include_think;
     body.stream ??= false;
     body.log_enabled ??= true;
